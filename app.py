@@ -89,7 +89,6 @@ def tts(client, text, voice, style):
                     ),
                 ),
             )
-            # Collect ALL audio parts (API may split across multiple parts)
             audio_parts = []
             for cand in getattr(r, "candidates", []):
                 for part in getattr(getattr(cand, "content", None), "parts", []):
@@ -110,16 +109,16 @@ def chunk_text(text, n=100):
     return [" ".join(words[i : i + n]) for i in range(0, len(words), n)] or [""]
 
 
-# ── JS audio player (queue-based, gapless) ──────────────
-def init_player():
-    components.html("""<script>
+# ── JS audio player (queue-based, gapless, speed control) ──
+def init_player(speed=1.0):
+    js = """
     (function() {
         var p = window.parent;
         if (p._player) try { p._player.stop(); } catch(e) {}
         var ctx = new AudioContext({sampleRate: 24000});
         if (ctx.state === 'suspended') ctx.resume();
         p._player = {
-            ctx: ctx, nextTime: 0, sources: [],
+            ctx: ctx, nextTime: 0, sources: [], speed: __SPEED__,
             addChunk: function(b64) {
                 if (this.ctx.state === 'closed') return;
                 if (this.ctx.state === 'suspended') this.ctx.resume();
@@ -133,10 +132,11 @@ def init_player():
                 buf.copyToChannel(f32, 0);
                 var src = this.ctx.createBufferSource();
                 src.buffer = buf;
+                src.playbackRate.value = this.speed;
                 src.connect(this.ctx.destination);
                 var t = Math.max(this.ctx.currentTime + 0.02, this.nextTime);
                 src.start(t);
-                this.nextTime = t + buf.duration;
+                this.nextTime = t + buf.duration / this.speed;
                 this.sources.push(src);
             },
             togglePause: function() {
@@ -151,15 +151,15 @@ def init_player():
             }
         };
     })();
-    </script>""", height=0)
+    """.replace("__SPEED__", str(speed))
+    components.html(f"<script>{js}</script>", height=0)
 
 
-_MAX_SEG = 1_200_000  # stay under Streamlit's WebSocket frame limit
+_MAX_SEG = 1_200_000
 
 
 def send_audio(pcm, container):
-    """Send PCM to JS player. Each segment gets its own iframe in the container
-    so nothing is replaced/lost (unlike st.empty which overwrites on each call)."""
+    """Send PCM to JS player. Each segment gets its own iframe in the container."""
     if len(pcm) % 2:
         pcm += b"\x00"
     for off in range(0, len(pcm), _MAX_SEG):
@@ -173,10 +173,7 @@ def send_audio(pcm, container):
 
 
 def player_action(action):
-    js = {
-        "pause": "p.togglePause();",
-        "stop": "p.stop();",
-    }
+    js = {"pause": "p.togglePause();", "stop": "p.stop();"}
     components.html(
         f'<script>(function(){{ var p=window.parent._player; if(p) {{ {js[action]} }} }})();</script>',
         height=0,
@@ -201,6 +198,10 @@ with st.sidebar:
     style = STYLES[style_name]
 
     wpc = st.slider("Words / chunk", 50, 200, 100, 10)
+    speed = st.select_slider(
+        "Speed", options=[1.0, 1.25, 1.5, 2.0], value=1.0,
+        format_func=lambda x: f"{x}×",
+    )
 
     st.divider()
     mode = st.radio("Input", ["Upload", "Paste"], horizontal=True)
@@ -240,7 +241,6 @@ if not client:
     st.warning("Set `VERTEX_API_KEY` or `GEMINI_API_KEY` environment variable.")
     st.stop()
 
-# Restore cached book on fresh session
 if "chapters" not in st.session_state:
     cached = _load_cache()
     if cached:
@@ -260,11 +260,13 @@ st.selectbox(
 )
 
 ch = chs[st.session_state.ch_idx]
-chunks = chunk_text(ch["text"], wpc)
-total = len(chunks)
+ch_chunks = chunk_text(ch["text"], wpc)
 
-start = st.slider("Start from chunk", 1, max(total, 1), 1) - 1
-st.caption(f"{total} chunks · {len(ch['text'].split())} words")
+start = st.slider("Start from chunk", 1, max(len(ch_chunks), 1), 1) - 1
+st.caption(
+    f"Ch {st.session_state.ch_idx + 1}/{len(chs)} · "
+    f"{len(ch_chunks)} chunks · {len(ch['text'].split())} words"
+)
 
 # ── Player controls ─────────────────────────────────────
 c1, c2, c3 = st.columns(3)
@@ -283,36 +285,51 @@ if stop:
 progress_bar = st.empty()
 transcript = st.empty()
 
-# ── Pipeline: transcribe one chunk ahead, play current ──
+# ── Pipeline: cross-chapter, 1-ahead prefetch ───────────
 if play:
-    pending = [c for c in chunks[start:] if c.strip()]
-    if not pending:
+    # Build flat playlist from current chapter+chunk to end of book
+    playlist = []  # (ch_idx, ch_title, ck_1based, ch_total, text)
+    for ci in range(st.session_state.ch_idx, len(chs)):
+        cks = chunk_text(chs[ci]["text"], wpc)
+        first = start if ci == st.session_state.ch_idx else 0
+        for ki, ck in enumerate(cks[first:], first):
+            if ck.strip():
+                playlist.append((ci, chs[ci]["title"], ki + 1, len(cks), ck))
+
+    if not playlist:
         st.warning("No text to read.")
     else:
-        init_player()
-        time.sleep(0.3)  # let browser set up AudioContext
-        audio_box = st.container()  # iframes accumulate here (not replaced)
+        init_player(speed)
+        time.sleep(0.3)
+        audio_box = st.container()
         lines = []
+        prev_ch = -1
         executor = ThreadPoolExecutor(max_workers=1)
         try:
-            fut = executor.submit(tts, client, pending[0], voice, style)
-            for i in range(len(pending)):
+            fut = executor.submit(tts, client, playlist[0][4], voice, style)
+            for i, (ci, title, ck_num, ch_tot, chunk) in enumerate(playlist):
                 try:
                     pcm = fut.result(timeout=90)
                 except Exception as e:
-                    progress_bar.error(f"Chunk {start + i + 1} failed: {e}")
+                    progress_bar.error(f"[{title}] chunk {ck_num} failed: {e}")
                     break
 
-                # prefetch next chunk while current one plays
-                if i + 1 < len(pending):
-                    fut = executor.submit(tts, client, pending[i + 1], voice, style)
+                # prefetch next chunk (may be from the next chapter)
+                if i + 1 < len(playlist):
+                    fut = executor.submit(
+                        tts, client, playlist[i + 1][4], voice, style
+                    )
 
                 send_audio(pcm, audio_box)
 
-                lines.append(pending[i])
+                if ci != prev_ch:
+                    lines.append(f"── {title} ──")
+                    prev_ch = ci
+                lines.append(chunk)
+
                 progress_bar.progress(
-                    (i + 1) / len(pending),
-                    f"Chunk {start + i + 1} / {total}",
+                    (i + 1) / len(playlist),
+                    f"{title} · {ck_num}/{ch_tot}",
                 )
                 transcript.text_area(
                     "Transcript",
@@ -324,7 +341,10 @@ if play:
             executor.shutdown(wait=False, cancel_futures=True)
 
         if lines:
-            progress_bar.success(f"Done — {len(lines)} chunks queued")
+            n_chs = prev_ch - st.session_state.ch_idx + 1
+            progress_bar.success(
+                f"Done — {len(playlist)} chunks, {n_chs} chapter(s)"
+            )
 
 # Keep mobile browser tab alive with silent oscillator
 components.html("""<script>
