@@ -9,7 +9,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Set one API key (`VERTEX_API_KEY` or `GEMINI_API_KEY`) in env vars or `.streamlit/secrets.toml`.
+Set `VERTEX_API_KEY` in env vars or `.streamlit/secrets.toml` (Vertex AI Express).
 
 ## Use
 
