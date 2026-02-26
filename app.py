@@ -2,7 +2,8 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
-import os, base64
+import os, json, base64
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
@@ -20,6 +21,28 @@ h1 { font-size: 1.4rem !important; margin-bottom: 0.25rem !important; }
 /* Smaller buttons for mobile */
 .stButton > button { padding: 0.35rem 0.4rem !important; font-size: 0.9rem !important; }
 </style>""", unsafe_allow_html=True)
+
+# ── Book cache (survives page refresh) ──────────────────
+_CACHE_FILE = Path(".cache/last_book.json")
+
+
+def _save_book_cache(fkey: str, name: str, chapters: list[dict]):
+    _CACHE_FILE.parent.mkdir(exist_ok=True)
+    _CACHE_FILE.write_text(json.dumps({"fkey": fkey, "name": name, "chapters": chapters}))
+
+
+def _load_book_cache() -> dict | None:
+    """Return {"fkey", "name", "chapters"} or None."""
+    if not _CACHE_FILE.exists():
+        return None
+    try:
+        data = json.loads(_CACHE_FILE.read_text())
+        if data.get("chapters"):
+            return data
+    except (json.JSONDecodeError, KeyError, OSError):
+        pass
+    return None
+
 
 # ── Voices (all 30 Gemini TTS voices) ───────────────────
 VOICES = [
@@ -348,22 +371,26 @@ with st.sidebar:
             if fkey != st.session_state.get("_fkey"):
                 from parsers import parse_file
                 try:
-                    st.session_state.chapters = parse_file(f, f.name)
+                    chapters = parse_file(f, f.name)
+                    st.session_state.chapters = chapters
                     st.session_state.ch_idx = 0
                     st.session_state.ck_idx = 0
                     clear_playback()
                     st.session_state._fkey = fkey
-                    st.success(f"✓ {len(st.session_state.chapters)} chapter(s)")
+                    _save_book_cache(fkey, f.name, chapters)
+                    st.success(f"✓ {len(chapters)} chapter(s)")
                 except Exception as e:
                     st.error(str(e))
     else:
         pasted = st.text_area("Paste text", height=200)
         if pasted and st.button("Load"):
             from parsers import parse_pasted_text
-            st.session_state.chapters = parse_pasted_text(pasted)
+            chapters = parse_pasted_text(pasted)
+            st.session_state.chapters = chapters
             st.session_state.ch_idx = 0
             st.session_state.ck_idx = 0
             clear_playback()
+            _save_book_cache("pasted", "Pasted text", chapters)
 
 
 # ── Main area ───────────────────────────────────────────
@@ -414,9 +441,18 @@ if not client:
     st.warning("Set `VERTEX_API_KEY` in Streamlit secrets or env vars (Vertex AI Express).")
     st.stop()
 
+# Auto-restore last book on fresh session (survives page refresh)
 if "chapters" not in st.session_state:
-    st.info("Upload a file or paste text in the sidebar to begin.")
-    st.stop()
+    cached = _load_book_cache()
+    if cached:
+        st.session_state.chapters = cached["chapters"]
+        st.session_state._fkey = cached["fkey"]
+        st.session_state.ch_idx = 0
+        st.session_state.ck_idx = 0
+        st.toast(f"Restored: {cached.get('name', 'previous book')}")
+    else:
+        st.info("Upload a file or paste text in the sidebar to begin.")
+        st.stop()
 
 chs = st.session_state.chapters
 
