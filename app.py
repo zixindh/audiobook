@@ -3,6 +3,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os, base64
+from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
 
@@ -270,17 +271,24 @@ def init_audio_streamer():
     """, height=0)
 
 
+_MAX_PCM_PER_MSG = 500 * 1024  # keep each WebSocket message well under Streamlit's buffer
+
+
 def send_audio_chunk(pcm: bytes):
-    """Send a PCM chunk to the JavaScript streamer for immediate playback."""
-    b64 = base64.b64encode(pcm).decode("ascii")
-    components.html(f"""
-    <script>
-    (function() {{
-        var s = window.parent._streamer;
-        if (s) s.addChunk("{b64}");
-    }})();
-    </script>
-    """, height=0)
+    """Send PCM to the JavaScript streamer, splitting large payloads to avoid WS errors."""
+    for off in range(0, len(pcm), _MAX_PCM_PER_MSG):
+        seg = pcm[off : off + _MAX_PCM_PER_MSG]
+        if len(seg) % 2:
+            seg += b"\x00"  # Int16 alignment
+        b64 = base64.b64encode(seg).decode("ascii")
+        components.html(f"""
+        <script>
+        (function() {{
+            var s = window.parent._streamer;
+            if (s) s.addChunk("{b64}");
+        }})();
+        </script>
+        """, height=0)
 
 
 def streamer_action(action: str):
@@ -441,31 +449,34 @@ if play_clicked:
         else:
             did_stream = True
             init_audio_streamer()
-            pcm_all = bytearray()
             accumulated = []
 
-            for i, ck in enumerate(pending):
-                try:
-                    pcm = tts(client, ck, voice, style)
-                except Exception as e:
-                    st.error(f"TTS error (chunk {i + 1}/{len(pending)}): {e}")
-                    break
-                pcm_all.extend(pcm)
-                send_audio_chunk(pcm)
-                accumulated.append(ck)
-                chunk_display.text_area(
-                    "📝 Live Transcript",
-                    " ".join(accumulated),
-                    height=200,
-                    disabled=True,
-                )
-                progress_display.progress(
-                    (i + 1) / len(pending),
-                    f"Streaming: chunk {i + 1} / {len(pending)}",
-                )
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [pool.submit(tts, client, ck, voice, style)
+                           for ck in pending]
+                for i, future in enumerate(futures):
+                    try:
+                        pcm = future.result(timeout=120)
+                    except Exception as e:
+                        st.error(f"TTS error (chunk {i + 1}/{len(pending)}): {e}")
+                        for f in futures[i + 1:]:
+                            f.cancel()
+                        break
+                    send_audio_chunk(pcm)
+                    accumulated.append(pending[i])
+                    chunk_display.text_area(
+                        "📝 Live Transcript",
+                        " ".join(accumulated),
+                        height=200,
+                        disabled=True,
+                    )
+                    progress_display.progress(
+                        (i + 1) / len(pending),
+                        f"Streaming: chunk {i + 1} / {len(pending)}",
+                    )
 
             progress_display.empty()
-            if pcm_all:
+            if accumulated:
                 st.session_state._streaming_active = True
                 st.session_state._transcript = " ".join(accumulated)
                 st.session_state.ck_idx = ck_i + len(accumulated) - 1
