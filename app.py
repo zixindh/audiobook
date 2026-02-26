@@ -9,6 +9,18 @@ from google.genai import types
 
 st.set_page_config(page_title="Audiobook Reader", page_icon="📖", layout="centered")
 
+# ── Mobile-friendly CSS ─────────────────────────────────
+st.markdown("""<style>
+/* Keep button columns in one row on narrow screens */
+[data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 0.25rem !important; }
+/* Tighter page padding */
+.block-container { padding-top: 1rem !important; padding-bottom: 0 !important; }
+/* Compact title */
+h1 { font-size: 1.4rem !important; margin-bottom: 0.25rem !important; }
+/* Smaller buttons for mobile */
+.stButton > button { padding: 0.35rem 0.4rem !important; font-size: 0.9rem !important; }
+</style>""", unsafe_allow_html=True)
+
 # ── Voices (all 30 Gemini TTS voices) ───────────────────
 VOICES = [
     ("Enceladus", "Breathy"), ("Kore", "Firm"), ("Charon", "Informative"),
@@ -271,7 +283,7 @@ def init_audio_streamer():
     """, height=0)
 
 
-_MAX_PCM_PER_MSG = 500 * 1024  # keep each WebSocket message well under Streamlit's buffer
+_MAX_PCM_PER_MSG = 1_200_000  # ~1.2MB raw → ~1.6MB base64, safely under Streamlit's ~2.5MB WS limit
 
 
 def send_audio_chunk(pcm: bytes):
@@ -465,7 +477,7 @@ left, middle, right = st.columns([1, 2, 1])
 with left:
     rewind_clicked = st.button("⏪ 15s", use_container_width=True, disabled=not is_active)
 with middle:
-    play_clicked = st.button("▶ Play / Pause", type="primary", use_container_width=True)
+    play_clicked = st.button("▶ Play", type="primary", use_container_width=True)
 with right:
     forward_clicked = st.button("15s ⏩", use_container_width=True, disabled=not is_active)
 
@@ -491,7 +503,7 @@ if play_clicked:
             init_audio_streamer()
             accumulated = []
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=8) as pool:
                 futures = [pool.submit(tts, client, ck, voice, style)
                            for ck in pending]
                 for i, future in enumerate(futures):
