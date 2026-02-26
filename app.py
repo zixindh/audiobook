@@ -357,9 +357,49 @@ with st.sidebar:
 # ── Main area ───────────────────────────────────────────
 st.title("📖 Audiobook Reader")
 
+# Keep the browser tab alive when the phone screen locks.
+# A silent AudioContext loop prevents mobile browsers from suspending the tab,
+# and visibilitychange handles reconnection if the WS dropped anyway.
+components.html("""
+<script>
+(function() {
+    const p = window.parent;
+    if (p._keepAlive) return;
+    p._keepAlive = true;
+
+    /* Inaudible ~1 Hz oscillator keeps mobile browsers from suspending the tab. */
+    try {
+        const ka = new AudioContext();
+        const osc = ka.createOscillator();
+        const gain = ka.createGain();
+        gain.gain.value = 0.0;
+        osc.connect(gain);
+        gain.connect(ka.destination);
+        osc.start();
+        document.addEventListener("visibilitychange", function() {
+            if (!document.hidden && ka.state === "suspended") ka.resume();
+        });
+    } catch(e) {}
+
+    /* When the user unlocks the screen, reload if Streamlit's WS is gone. */
+    document.addEventListener("visibilitychange", function() {
+        if (document.hidden) return;
+        var ws = p.document.querySelector(
+            "iframe[title='streamlitHealthCheck']"
+        );
+        /* Streamlit shows a modal overlay when disconnected. */
+        var modal = p.document.querySelector("[data-testid='stStatusWidget']");
+        if (modal && modal.textContent.toLowerCase().includes("reconnect")) {
+            p.location.reload();
+        }
+    });
+})();
+</script>
+""", height=0)
+
 client = get_client()
 if not client:
-    st.warning("Set `VERTEX_API_KEY` or `GEMINI_API_KEY` in Streamlit secrets or env vars.")
+    st.warning("Set `VERTEX_API_KEY` in Streamlit secrets or env vars (Vertex AI Express).")
     st.stop()
 
 if "chapters" not in st.session_state:
