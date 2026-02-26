@@ -1,65 +1,26 @@
-# Audiobook Reader
+# Audiobook Reader (Snap Note)
 
-Gemini TTS-powered text-to-speech reader for books and documents.
+One-click Gemini TTS for long documents.
 
-## Quick Start
+## Start
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## API Key
+Set one API key (`VERTEX_API_KEY` or `GEMINI_API_KEY`) in env vars or `.streamlit/secrets.toml`.
 
-Set **one** of these:
+## Use
 
-| Key | Mode |
-|-----|------|
-| `VERTEX_API_KEY` | Vertex AI Express |
-| `GEMINI_API_KEY` | Gemini Developer API |
+1. Upload a file or paste text.
+2. Pick chapter + start chunk (default 100 words/chunk).
+3. Tap **▶ Play / Pause** once to generate rolling audio to chapter end.
+4. Use **⏪ 15s** and **15s ⏩** for quick seek.
 
-- **Local**: `.streamlit/secrets.toml` or env var
-- **Cloud**: Streamlit Cloud → Settings → Secrets
+## Notes
 
-## Supported Formats
-
-`epub` · `pdf` · `docx` · `txt` · `md` · `mobi`
-
-> mobi needs the `mobi` pip package. If extraction fails, convert to epub via [Calibre](https://calibre-ebook.com).
-
-## How It Works
-
-1. **Upload** file or **paste** text → chapters auto-detected
-2. **Select** chapter → text split into ~100-word chunks
-3. **Play** → Gemini TTS generates audio for current chunk only
-4. **Navigate** with Prev / Next / slider
-
-## Token Efficiency
-
-- Only the current ~100-word chunk hits the API per play
-- Chapter selection prevents processing the whole book
-- AI cleanup is on-demand only (button per chapter)
-
-## AI Cleanup
-
-Badly formatted chapters (broken headings, HTML artifacts, page numbers) can be fixed with the **🧹 AI Clean** button. Uses `gemini-2.5-flash-preview-04-17`, limited to first 20k chars to save cost.
-
-## Voices
-
-30 built-in voices — Kore (Firm), Puck (Upbeat), Enceladus (Breathy), Charon (Informative), etc. Full list in the sidebar dropdown.
-
-## Style Presets
-
-Narrator · Storyteller · Podcast · News · Whisper · Custom
-
-## Stack
-
-| Layer | Tech |
-|-------|------|
-| UI | Streamlit |
-| TTS | `gemini-2.5-flash-preview-tts` (24kHz PCM → WAV) |
-| Text cleanup | `gemini-2.5-flash-preview-04-17` (on-demand) |
-| epub | ebooklib + BeautifulSoup4 |
-| pdf | pdfplumber |
-| docx | python-docx |
-| mobi | mobi (KindleUnpack) |
+- Rolling playback is chunked (cost-safe for long books).
+- **🧹 AI Clean** is optional, on-demand, and only cleans first ~20k chars for cost control.
+- Formats: `epub`, `pdf`, `docx`, `txt`, `md`, `mobi`.
+- If `.mobi` extraction fails, convert to `.epub` (Calibre works well).

@@ -1,6 +1,7 @@
 """Audiobook Reader — Gemini TTS-powered text-to-speech for books & documents."""
 
 import streamlit as st
+import streamlit.components.v1 as components
 import os, io, wave
 from google import genai
 from google.genai import types
@@ -77,30 +78,126 @@ def pcm_to_wav(pcm: bytes, rate=24000, ch=1, width=2) -> bytes:
     return buf.getvalue()
 
 
+def _extract_audio_from_response(resp) -> bytes | None:
+    """Safely extract inline PCM from a Gemini response."""
+    for cand in getattr(resp, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            data = getattr(inline, "data", None)
+            if data:
+                return data
+    return None
+
+
+def _tts_response_error(resp) -> str:
+    """Build a useful error when TTS returns no audio payload."""
+    details = []
+    feedback = getattr(resp, "prompt_feedback", None)
+    if feedback:
+        reason = getattr(feedback, "block_reason", None)
+        reason_msg = getattr(feedback, "block_reason_message", None)
+        if reason:
+            details.append(f"block_reason={reason}")
+        if reason_msg:
+            details.append(str(reason_msg))
+    for cand in (getattr(resp, "candidates", None) or [])[:1]:
+        finish = getattr(cand, "finish_reason", None)
+        if finish:
+            details.append(f"finish_reason={finish}")
+    text = getattr(resp, "text", None)
+    if text:
+        details.append(f"text={str(text)[:180]}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    return "No audio returned by TTS model. Try again or lower words/chunk." + suffix
+
+
 def tts(client, text: str, voice: str, style: str = "") -> bytes:
     """Call Gemini TTS and return PCM audio bytes."""
     prompt = f"{style}:\n\n{text}" if style else text
-    r = client.models.generate_content(
-        model="gemini-2.5-flash-preview-tts",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice,
+    last_error = "No audio returned by TTS model."
+    # Retry once because the TTS endpoint can intermittently return empty candidates.
+    for _ in range(2):
+        r = client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice,
+                        )
                     )
-                )
+                ),
             ),
-        ),
-    )
-    return r.candidates[0].content.parts[0].inline_data.data
+        )
+        pcm = _extract_audio_from_response(r)
+        if pcm:
+            return pcm
+        last_error = _tts_response_error(r)
+    raise RuntimeError(last_error)
 
 
 def chunk_text(text: str, n: int = 100) -> list[str]:
     """Split text into ~n-word chunks."""
     words = text.split()
     return [" ".join(words[i : i + n]) for i in range(0, len(words), n)] or [""]
+
+
+def clear_playback():
+    """Clear cached audio + player action state."""
+    for key in ("audio", "_player_action", "_audio_nonce"):
+        st.session_state.pop(key, None)
+
+
+def queue_player_action(action: str):
+    """Queue a browser-side player action for the current rerun."""
+    st.session_state._audio_nonce = st.session_state.get("_audio_nonce", 0) + 1
+    st.session_state._player_action = action
+
+
+def run_player_action(action: str):
+    """Run browser-side audio controls from Streamlit button clicks."""
+    nonce = st.session_state.get("_audio_nonce", 0)
+    components.html(
+        f"""
+        <script>
+          const nonce = "{nonce}";
+          const action = "{action}";
+          const runAction = () => {{
+            const players = window.parent.document.querySelectorAll("audio");
+            if (!players.length) return;
+            const player = players[players.length - 1];
+            if (action === "play") {{
+              player.autoplay = true;
+              player.play().catch(() => {{}});
+              return;
+            }}
+            if (action === "toggle") {{
+              if (player.paused) {{
+                player.play().catch(() => {{}});
+              }} else {{
+                player.pause();
+              }}
+              return;
+            }}
+            if (action === "rewind15") {{
+              player.currentTime = Math.max(0, player.currentTime - 15);
+              return;
+            }}
+            if (action === "forward15") {{
+              const maxT = Number.isFinite(player.duration) ? player.duration : player.currentTime + 15;
+              player.currentTime = Math.min(maxT, player.currentTime + 15);
+            }}
+          }};
+          runAction();
+          setTimeout(runAction, 200);
+          setTimeout(runAction, 900);
+        </script>
+        """,
+        height=0,
+    )
 
 
 # ── Session state defaults ──────────────────────────────
@@ -135,7 +232,7 @@ with st.sidebar:
                     st.session_state.chapters = parse_file(f, f.name)
                     st.session_state.ch_idx = 0
                     st.session_state.ck_idx = 0
-                    st.session_state.pop("audio", None)
+                    clear_playback()
                     st.session_state._fkey = fkey
                     st.success(f"✓ {len(st.session_state.chapters)} chapter(s)")
                 except Exception as e:
@@ -147,7 +244,7 @@ with st.sidebar:
             st.session_state.chapters = parse_pasted_text(pasted)
             st.session_state.ch_idx = 0
             st.session_state.ck_idx = 0
-            st.session_state.pop("audio", None)
+            clear_playback()
 
 
 # ── Main area ───────────────────────────────────────────
@@ -167,7 +264,7 @@ chs = st.session_state.chapters
 # ── Chapter selector ────────────────────────────────────
 def _on_ch_change():
     st.session_state.ck_idx = 0
-    st.session_state.pop("audio", None)
+    clear_playback()
 
 st.selectbox("Chapter", range(len(chs)),
              format_func=lambda i: chs[i]["title"],
@@ -193,7 +290,7 @@ with c_clean:
                 cleaned += raw[20000:]
             st.session_state.chapters[ch_i]["text"] = cleaned
             st.session_state.ck_idx = 0
-            st.session_state.pop("audio", None)
+            clear_playback()
             st.rerun()
 with c_info:
     st.caption("Fix badly formatted text with AI (uses tokens)")
@@ -203,36 +300,59 @@ chunks = chunk_text(chs[ch_i]["text"], wpc)
 total = len(chunks)
 ck_i = min(st.session_state.ck_idx, total - 1)
 
-c1, c2, c3 = st.columns([1, 4, 1])
-with c1:
-    if st.button("⏮ Prev", disabled=ck_i == 0, use_container_width=True):
-        st.session_state.ck_idx = ck_i - 1
-        st.session_state.pop("audio", None)
-        st.rerun()
-with c2:
-    new_ck = st.slider("pos", 0, max(total - 1, 0), ck_i, label_visibility="collapsed")
-    if new_ck != ck_i:
-        st.session_state.ck_idx = new_ck
-        st.session_state.pop("audio", None)
-        st.rerun()
-with c3:
-    if st.button("Next ⏭", disabled=ck_i >= total - 1, use_container_width=True):
-        st.session_state.ck_idx = ck_i + 1
-        st.session_state.pop("audio", None)
-        st.rerun()
+new_ck = st.slider("Start chunk", 0, max(total - 1, 0), ck_i)
+if new_ck != ck_i:
+    st.session_state.ck_idx = new_ck
+    clear_playback()
+    st.rerun()
 
 st.caption(f"Chunk {ck_i + 1} / {total}  ·  {len(chunks[ck_i].split())} words")
 st.text_area("chunk_text", chunks[ck_i], height=150, disabled=True,
              label_visibility="collapsed")
 
-# ── Generate & play audio ──────────────────────────────
-if st.button("▶  Play", type="primary", use_container_width=True):
-    with st.spinner("Generating speech…"):
-        try:
-            pcm = tts(client, chunks[ck_i], voice, style)
-            st.session_state.audio = pcm_to_wav(pcm)
-        except Exception as e:
-            st.error(f"TTS error: {e}")
+# ── Player controls (Apple Podcasts style) ─────────────
+has_audio = "audio" in st.session_state
+left, middle, right = st.columns([1, 2, 1])
+
+with left:
+    if st.button("⏪ 15s", use_container_width=True, disabled=not has_audio):
+        queue_player_action("rewind15")
+
+with middle:
+    if st.button("▶ Play / Pause", type="primary", use_container_width=True):
+        if has_audio:
+            queue_player_action("toggle")
+        else:
+            with st.spinner("Generating rolling speech…"):
+                try:
+                    pending_chunks = chunks[ck_i:]
+                    non_empty_chunks = [c for c in pending_chunks if c.strip()]
+                    if not non_empty_chunks:
+                        st.warning("No readable text found in this chunk range.")
+                    else:
+                        total_pending = len(non_empty_chunks)
+                        pcm_all = bytearray()
+                        progress = st.progress(0.0, text=f"Chunk 1 / {total_pending}")
+                        for i, chunk in enumerate(non_empty_chunks, start=1):
+                            try:
+                                pcm_all.extend(tts(client, chunk, voice, style))
+                            except Exception as chunk_err:
+                                raise RuntimeError(f"Chunk {i}/{total_pending}: {chunk_err}") from chunk_err
+                            progress.progress(i / total_pending, text=f"Chunk {i} / {total_pending}")
+                        progress.empty()
+                        st.session_state.audio = pcm_to_wav(bytes(pcm_all))
+                        st.session_state.ck_idx = total - 1
+                        queue_player_action("play")
+                except Exception as e:
+                    st.error(f"TTS error: {e}")
+
+with right:
+    if st.button("15s ⏩", use_container_width=True, disabled=not has_audio):
+        queue_player_action("forward15")
 
 if "audio" in st.session_state:
-    st.audio(st.session_state.audio, format="audio/wav", autoplay=True)
+    st.audio(st.session_state.audio, format="audio/wav", autoplay=False)
+    action = st.session_state.get("_player_action")
+    if action:
+        run_player_action(action)
+        st.session_state._player_action = None
