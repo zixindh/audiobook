@@ -113,13 +113,13 @@ def chunk_text(text, n=100):
 # Uses <audio> elements instead of Web Audio API so the browser's
 # built-in WSOLA time-stretcher preserves pitch at any speed
 # (same mechanism YouTube uses).
-def init_player(speed=1.0):
+def init_player():
     js = """
     (function() {
         var p = window.parent;
         if (p._player) try { p._player.stop(); } catch(e) {}
         p._player = {
-            queue: [], current: null, speed: __SPEED__, paused: false,
+            queue: [], current: null, speed: p._desiredSpeed || 1.0, paused: false,
 
             addChunk: function(b64) {
                 var url = URL.createObjectURL(this._wav(b64));
@@ -187,7 +187,7 @@ def init_player(speed=1.0):
             }
         };
     })();
-    """.replace("__SPEED__", str(speed))
+    """
     components.html(f"<script>{js}</script>", height=0)
 
 
@@ -237,10 +237,6 @@ with st.sidebar:
     style = STYLES[style_name]
 
     wpc = st.slider("Words / chunk", 50, 200, 100, 10)
-    speed = st.select_slider(
-        "Speed", options=[1.0, 1.25, 1.5, 2.0], value=1.0,
-        format_func=lambda x: f"{x}×",
-    )
 
     st.divider()
     mode = st.radio("Input", ["Upload", "Paste"], horizontal=True)
@@ -298,6 +294,11 @@ st.selectbox(
     key="ch_idx",
 )
 
+# Stop player when chapter changes
+if st.session_state.get("_prev_ch") is not None and st.session_state._prev_ch != st.session_state.ch_idx:
+    player_action("stop")
+st.session_state._prev_ch = st.session_state.ch_idx
+
 ch = chs[st.session_state.ch_idx]
 ch_chunks = chunk_text(ch["text"], wpc)
 
@@ -321,6 +322,36 @@ if pause:
 if stop:
     player_action("stop")
 
+# Speed buttons — pure JS, no Streamlit rerun, no playback interruption
+components.html("""
+<style>
+.sb{border:1px solid #ddd;background:#fafafa;padding:3px 11px;border-radius:4px;
+    cursor:pointer;font-size:13px;font-family:sans-serif}
+.sb:hover{background:#eee}
+.sb.on{background:#ff4b4b;color:#fff;border-color:#ff4b4b}
+</style>
+<div style="display:flex;gap:6px;align-items:center">
+ <span style="font-size:13px;color:#888">Speed</span>
+ <button class="sb" onclick="ss(1)">1×</button>
+ <button class="sb" onclick="ss(1.25)">1.25×</button>
+ <button class="sb" onclick="ss(1.5)">1.5×</button>
+ <button class="sb" onclick="ss(2)">2×</button>
+</div>
+<script>
+function ss(s){
+    window.parent._desiredSpeed=s;
+    var p=window.parent._player; if(p) p.setSpeed(s);
+    document.querySelectorAll('.sb').forEach(function(b){
+        b.classList.toggle('on',parseFloat(b.textContent)===s);
+    });
+}
+var c=window.parent._desiredSpeed||1;
+document.querySelectorAll('.sb').forEach(function(b){
+    b.classList.toggle('on',parseFloat(b.textContent)===c);
+});
+</script>
+""", height=36)
+
 progress_bar = st.empty()
 transcript = st.empty()
 
@@ -338,7 +369,7 @@ if play:
     if not playlist:
         st.warning("No text to read.")
     else:
-        init_player(speed)
+        init_player()
         time.sleep(0.3)
         audio_box = st.container()
         lines = []
@@ -384,12 +415,6 @@ if play:
             progress_bar.success(
                 f"Done — {len(playlist)} chunks, {n_chs} chapter(s)"
             )
-
-# Sync speed to player on every rerun (handles live slider changes mid-playback)
-components.html(
-    f'<script>(function(){{ var p=window.parent._player; if(p) p.setSpeed({speed}); }})();</script>',
-    height=0,
-)
 
 # Keep mobile browser tab alive with silent oscillator
 components.html("""<script>
