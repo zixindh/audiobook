@@ -2,7 +2,7 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
-import os, json, base64
+import os, json, base64, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
@@ -309,21 +309,22 @@ def init_audio_streamer():
 _MAX_PCM_PER_MSG = 1_200_000  # ~1.2MB raw → ~1.6MB base64, safely under Streamlit's ~2.5MB WS limit
 
 
-def send_audio_chunk(pcm: bytes):
-    """Send PCM to the JavaScript streamer, splitting large payloads to avoid WS errors."""
+def send_audio_chunk(pcm: bytes, placeholder):
+    """Send PCM to the JS streamer, overwriting a single placeholder to avoid iframe stacking."""
     for off in range(0, len(pcm), _MAX_PCM_PER_MSG):
         seg = pcm[off : off + _MAX_PCM_PER_MSG]
         if len(seg) % 2:
             seg += b"\x00"  # Int16 alignment
         b64 = base64.b64encode(seg).decode("ascii")
-        components.html(f"""
-        <script>
-        (function() {{
-            var s = window.parent._streamer;
-            if (s) s.addChunk("{b64}");
-        }})();
-        </script>
-        """, height=0)
+        with placeholder.container():
+            components.html(f"""
+            <script>
+            (function() {{
+                var s = window.parent._streamer;
+                if (s) s.addChunk("{b64}");
+            }})();
+            </script>
+            """, height=0)
 
 
 def streamer_action(action: str):
@@ -538,8 +539,9 @@ if play_clicked:
             did_stream = True
             init_audio_streamer()
             accumulated = []
+            js_runner = st.empty()
 
-            with ThreadPoolExecutor(max_workers=8) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 futures = [pool.submit(tts, client, ck, voice, style)
                            for ck in pending]
                 for i, future in enumerate(futures):
@@ -550,7 +552,8 @@ if play_clicked:
                         for f in futures[i + 1:]:
                             f.cancel()
                         break
-                    send_audio_chunk(pcm)
+                    send_audio_chunk(pcm, js_runner)
+                    time.sleep(0.05)  # flush JS payload to the browser
                     accumulated.append(pending[i])
                     chunk_display.text_area(
                         "📝 Live Transcript",
