@@ -1,6 +1,7 @@
 """Audiobook Reader — Gemini TTS-powered text-to-speech for books & documents."""
 
 import streamlit as st
+import streamlit.components.v1 as components
 import os, io, wave
 from google import genai
 from google.genai import types
@@ -103,6 +104,35 @@ def chunk_text(text: str, n: int = 100) -> list[str]:
     return [" ".join(words[i : i + n]) for i in range(0, len(words), n)] or [""]
 
 
+def clear_playback():
+    """Clear cached audio + autoplay state."""
+    for key in ("audio", "_force_autoplay", "_audio_nonce"):
+        st.session_state.pop(key, None)
+
+
+def force_autoplay():
+    """Nudge browser autoplay in case built-in autoplay is blocked."""
+    nonce = st.session_state.get("_audio_nonce", 0)
+    components.html(
+        f"""
+        <script>
+          const nonce = "{nonce}";
+          const playLatest = () => {{
+            const players = window.parent.document.querySelectorAll("audio");
+            if (!players.length) return;
+            const player = players[players.length - 1];
+            player.autoplay = true;
+            player.play().catch(() => {{}});
+          }};
+          playLatest();
+          setTimeout(playLatest, 200);
+          setTimeout(playLatest, 900);
+        </script>
+        """,
+        height=0,
+    )
+
+
 # ── Session state defaults ──────────────────────────────
 for k, v in {"ch_idx": 0, "ck_idx": 0}.items():
     if k not in st.session_state:
@@ -135,7 +165,7 @@ with st.sidebar:
                     st.session_state.chapters = parse_file(f, f.name)
                     st.session_state.ch_idx = 0
                     st.session_state.ck_idx = 0
-                    st.session_state.pop("audio", None)
+                    clear_playback()
                     st.session_state._fkey = fkey
                     st.success(f"✓ {len(st.session_state.chapters)} chapter(s)")
                 except Exception as e:
@@ -147,7 +177,7 @@ with st.sidebar:
             st.session_state.chapters = parse_pasted_text(pasted)
             st.session_state.ch_idx = 0
             st.session_state.ck_idx = 0
-            st.session_state.pop("audio", None)
+            clear_playback()
 
 
 # ── Main area ───────────────────────────────────────────
@@ -167,7 +197,7 @@ chs = st.session_state.chapters
 # ── Chapter selector ────────────────────────────────────
 def _on_ch_change():
     st.session_state.ck_idx = 0
-    st.session_state.pop("audio", None)
+    clear_playback()
 
 st.selectbox("Chapter", range(len(chs)),
              format_func=lambda i: chs[i]["title"],
@@ -193,7 +223,7 @@ with c_clean:
                 cleaned += raw[20000:]
             st.session_state.chapters[ch_i]["text"] = cleaned
             st.session_state.ck_idx = 0
-            st.session_state.pop("audio", None)
+            clear_playback()
             st.rerun()
 with c_info:
     st.caption("Fix badly formatted text with AI (uses tokens)")
@@ -207,18 +237,18 @@ c1, c2, c3 = st.columns([1, 4, 1])
 with c1:
     if st.button("⏮ Prev", disabled=ck_i == 0, use_container_width=True):
         st.session_state.ck_idx = ck_i - 1
-        st.session_state.pop("audio", None)
+        clear_playback()
         st.rerun()
 with c2:
     new_ck = st.slider("pos", 0, max(total - 1, 0), ck_i, label_visibility="collapsed")
     if new_ck != ck_i:
         st.session_state.ck_idx = new_ck
-        st.session_state.pop("audio", None)
+        clear_playback()
         st.rerun()
 with c3:
     if st.button("Next ⏭", disabled=ck_i >= total - 1, use_container_width=True):
         st.session_state.ck_idx = ck_i + 1
-        st.session_state.pop("audio", None)
+        clear_playback()
         st.rerun()
 
 st.caption(f"Chunk {ck_i + 1} / {total}  ·  {len(chunks[ck_i].split())} words")
@@ -227,12 +257,29 @@ st.text_area("chunk_text", chunks[ck_i], height=150, disabled=True,
 
 # ── Generate & play audio ──────────────────────────────
 if st.button("▶  Play", type="primary", use_container_width=True):
-    with st.spinner("Generating speech…"):
+    with st.spinner("Generating rolling speech…"):
         try:
-            pcm = tts(client, chunks[ck_i], voice, style)
-            st.session_state.audio = pcm_to_wav(pcm)
+            pending_chunks = chunks[ck_i:]
+            non_empty_chunks = [c for c in pending_chunks if c.strip()]
+            if not non_empty_chunks:
+                st.warning("No readable text found in this chunk range.")
+            else:
+                total_pending = len(non_empty_chunks)
+                pcm_all = bytearray()
+                progress = st.progress(0.0, text=f"Chunk 1 / {total_pending}")
+                for i, chunk in enumerate(non_empty_chunks, start=1):
+                    pcm_all.extend(tts(client, chunk, voice, style))
+                    progress.progress(i / total_pending, text=f"Chunk {i} / {total_pending}")
+                progress.empty()
+                st.session_state.audio = pcm_to_wav(bytes(pcm_all))
+                st.session_state.ck_idx = total - 1
+                st.session_state._audio_nonce = st.session_state.get("_audio_nonce", 0) + 1
+                st.session_state._force_autoplay = True
         except Exception as e:
             st.error(f"TTS error: {e}")
 
 if "audio" in st.session_state:
     st.audio(st.session_state.audio, format="audio/wav", autoplay=True)
+    if st.session_state.get("_force_autoplay"):
+        force_autoplay()
+        st.session_state._force_autoplay = False

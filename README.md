@@ -31,12 +31,13 @@ Set **one** of these:
 
 1. **Upload** file or **paste** text → chapters auto-detected
 2. **Select** chapter → text split into ~100-word chunks
-3. **Play** → Gemini TTS generates audio for current chunk only
-4. **Navigate** with Prev / Next / slider
+3. **Play** → Gemini TTS rolls from the current chunk to chapter end (100-word chunks by default)
+4. **Autoplay** starts the generated audio immediately (single click flow)
+5. **Navigate** with Prev / Next / slider
 
 ## Token Efficiency
 
-- Only the current ~100-word chunk hits the API per play
+- Rolling playback still sends ~100-word chunks to the API (chunk-by-chunk)
 - Chapter selection prevents processing the whole book
 - AI cleanup is on-demand only (button per chapter)
 
