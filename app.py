@@ -89,11 +89,15 @@ def tts(client, text, voice, style):
                     ),
                 ),
             )
+            # Collect ALL audio parts (API may split across multiple parts)
+            audio_parts = []
             for cand in getattr(r, "candidates", []):
                 for part in getattr(getattr(cand, "content", None), "parts", []):
                     data = getattr(getattr(part, "inline_data", None), "data", None)
                     if data:
-                        return data
+                        audio_parts.append(data)
+            if audio_parts:
+                return b"".join(audio_parts)
         except Exception:
             if attempt == 2:
                 raise
@@ -153,13 +157,15 @@ def init_player():
 _MAX_SEG = 1_200_000  # stay under Streamlit's WebSocket frame limit
 
 
-def send_audio(pcm, placeholder):
+def send_audio(pcm, container):
+    """Send PCM to JS player. Each segment gets its own iframe in the container
+    so nothing is replaced/lost (unlike st.empty which overwrites on each call)."""
+    if len(pcm) % 2:
+        pcm += b"\x00"
     for off in range(0, len(pcm), _MAX_SEG):
         seg = pcm[off : off + _MAX_SEG]
-        if len(seg) % 2:
-            seg += b"\x00"
         b64 = base64.b64encode(seg).decode("ascii")
-        with placeholder.container():
+        with container:
             components.html(
                 f'<script>(function(){{ var p=window.parent._player; if(p) p.addChunk("{b64}"); }})();</script>',
                 height=0,
@@ -284,7 +290,8 @@ if play:
         st.warning("No text to read.")
     else:
         init_player()
-        js_ph = st.empty()
+        time.sleep(0.3)  # let browser set up AudioContext
+        audio_box = st.container()  # iframes accumulate here (not replaced)
         lines = []
         executor = ThreadPoolExecutor(max_workers=1)
         try:
@@ -300,8 +307,7 @@ if play:
                 if i + 1 < len(pending):
                     fut = executor.submit(tts, client, pending[i + 1], voice, style)
 
-                send_audio(pcm, js_ph)
-                time.sleep(0.05)
+                send_audio(pcm, audio_box)
 
                 lines.append(pending[i])
                 progress_bar.progress(
