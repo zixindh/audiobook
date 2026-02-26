@@ -1,0 +1,4 @@
+[server]
+# Keep WebSocket alive when the phone screen is locked / tab is backgrounded.
+# Default is 60s — far too short for audiobook listening sessions.
+pingTimeout = 86400
