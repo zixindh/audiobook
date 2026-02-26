@@ -2,7 +2,7 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
-import os, io, wave
+import os, io, wave, base64
 from google import genai
 from google.genai import types
 
@@ -146,58 +146,168 @@ def chunk_text(text: str, n: int = 100) -> list[str]:
 
 
 def clear_playback():
-    """Clear cached audio + player action state."""
-    for key in ("audio", "_player_action", "_audio_nonce"):
+    """Clear cached audio and streaming state."""
+    for key in ("audio", "_streaming_active", "_transcript"):
         st.session_state.pop(key, None)
+    st.session_state._stop_streamer = True
 
 
-def queue_player_action(action: str):
-    """Queue a browser-side player action for the current rerun."""
-    st.session_state._audio_nonce = st.session_state.get("_audio_nonce", 0) + 1
-    st.session_state._player_action = action
+def init_audio_streamer():
+    """Set up a Web Audio API streamer on the parent window for gapless chunk playback."""
+    components.html("""
+    <script>
+    (function() {
+        const p = window.parent;
+        if (p._streamer) { try { p._streamer.stop(); } catch(e) {} }
+
+        const ctx = new AudioContext({sampleRate: 24000});
+        if (ctx.state === 'suspended') ctx.resume();
+
+        p._streamer = {
+            ctx: ctx,
+            nextTime: 0,
+            allPcm: [],
+            totalSamples: 0,
+            activeSources: [],
+            playStartCtx: 0,
+            playStartOffset: 0,
+            _pausedSample: 0,
+
+            addChunk: function(b64) {
+                if (ctx.state === 'suspended') ctx.resume();
+                var bin = atob(b64);
+                var u8 = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+                var i16 = new Int16Array(u8.buffer);
+                var f32 = new Float32Array(i16.length);
+                for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768.0;
+
+                this.allPcm.push(f32);
+                this.totalSamples += f32.length;
+
+                var buf = ctx.createBuffer(1, f32.length, 24000);
+                buf.copyToChannel(f32, 0);
+                var src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                var t = Math.max(ctx.currentTime + 0.02, this.nextTime);
+                src.start(t);
+                this.nextTime = t + buf.duration;
+                this.activeSources.push(src);
+                if (this.allPcm.length === 1) {
+                    this.playStartCtx = t;
+                    this.playStartOffset = 0;
+                }
+            },
+
+            currentSample: function() {
+                if (ctx.state === 'suspended') return this._pausedSample || 0;
+                var elapsed = ctx.currentTime - this.playStartCtx;
+                return Math.min(
+                    this.playStartOffset + Math.floor(elapsed * 24000),
+                    this.totalSamples
+                );
+            },
+
+            /* Stop current sources and replay from a specific sample offset. */
+            _rebuildAndPlay: function(fromSample) {
+                var self = this;
+                this.activeSources.forEach(function(s) { try { s.stop(); } catch(e) {} });
+                this.activeSources = [];
+                fromSample = Math.max(0, Math.min(fromSample, this.totalSamples - 1));
+                var remaining = this.totalSamples - fromSample;
+                if (remaining <= 0) return;
+
+                var allData = new Float32Array(remaining);
+                var writePos = 0, soFar = 0;
+                for (var ci = 0; ci < this.allPcm.length; ci++) {
+                    var chunk = this.allPcm[ci];
+                    var chunkEnd = soFar + chunk.length;
+                    if (chunkEnd > fromSample) {
+                        var start = Math.max(0, fromSample - soFar);
+                        var sub = chunk.subarray(start);
+                        allData.set(sub, writePos);
+                        writePos += sub.length;
+                    }
+                    soFar = chunkEnd;
+                }
+                var buf = ctx.createBuffer(1, remaining, 24000);
+                buf.copyToChannel(allData, 0);
+                var src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                if (ctx.state === 'suspended') {
+                    ctx.resume().then(function() {
+                        src.start();
+                        self.playStartCtx = ctx.currentTime;
+                        self.playStartOffset = fromSample;
+                        self.nextTime = ctx.currentTime + buf.duration;
+                    });
+                } else {
+                    src.start();
+                    self.playStartCtx = ctx.currentTime;
+                    self.playStartOffset = fromSample;
+                    self.nextTime = ctx.currentTime + buf.duration;
+                }
+                this.activeSources = [src];
+            },
+
+            togglePause: function() {
+                if (ctx.state === 'running') {
+                    this._pausedSample = this.currentSample();
+                    ctx.suspend();
+                } else if (ctx.state === 'suspended') {
+                    ctx.resume();
+                    this.playStartCtx = ctx.currentTime;
+                    this.playStartOffset = this._pausedSample || 0;
+                }
+            },
+
+            seekRelative: function(seconds) {
+                var cur = this.currentSample();
+                this._rebuildAndPlay(cur + Math.floor(seconds * 24000));
+            },
+
+            stop: function() {
+                this.activeSources.forEach(function(s) { try { s.stop(); } catch(e) {} });
+                this.activeSources = [];
+                this.allPcm = [];
+                this.totalSamples = 0;
+                try { ctx.close(); } catch(e) {}
+            }
+        };
+    })();
+    </script>
+    """, height=0)
 
 
-def run_player_action(action: str):
-    """Run browser-side audio controls from Streamlit button clicks."""
-    nonce = st.session_state.get("_audio_nonce", 0)
-    components.html(
-        f"""
-        <script>
-          const nonce = "{nonce}";
-          const action = "{action}";
-          const runAction = () => {{
-            const players = window.parent.document.querySelectorAll("audio");
-            if (!players.length) return;
-            const player = players[players.length - 1];
-            if (action === "play") {{
-              player.autoplay = true;
-              player.play().catch(() => {{}});
-              return;
-            }}
-            if (action === "toggle") {{
-              if (player.paused) {{
-                player.play().catch(() => {{}});
-              }} else {{
-                player.pause();
-              }}
-              return;
-            }}
-            if (action === "rewind15") {{
-              player.currentTime = Math.max(0, player.currentTime - 15);
-              return;
-            }}
-            if (action === "forward15") {{
-              const maxT = Number.isFinite(player.duration) ? player.duration : player.currentTime + 15;
-              player.currentTime = Math.min(maxT, player.currentTime + 15);
-            }}
-          }};
-          runAction();
-          setTimeout(runAction, 200);
-          setTimeout(runAction, 900);
-        </script>
-        """,
-        height=0,
-    )
+def send_audio_chunk(pcm: bytes):
+    """Send a PCM chunk to the JavaScript streamer for immediate playback."""
+    b64 = base64.b64encode(pcm).decode("ascii")
+    components.html(f"""
+    <script>
+    (function() {{
+        var s = window.parent._streamer;
+        if (s) s.addChunk("{b64}");
+    }})();
+    </script>
+    """, height=0)
+
+
+def streamer_action(action: str):
+    """Send a control command (toggle/rewind15/forward15/stop) to the audio streamer."""
+    components.html(f"""
+    <script>
+    (function() {{
+        var s = window.parent._streamer;
+        if (!s) return;
+        if ("{action}" === "toggle") s.togglePause();
+        else if ("{action}" === "rewind15") s.seekRelative(-15);
+        else if ("{action}" === "forward15") s.seekRelative(15);
+        else if ("{action}" === "stop") s.stop();
+    }})();
+    </script>
+    """, height=0)
 
 
 # ── Session state defaults ──────────────────────────────
@@ -307,52 +417,85 @@ if new_ck != ck_i:
     st.rerun()
 
 st.caption(f"Chunk {ck_i + 1} / {total}  ·  {len(chunks[ck_i].split())} words")
-st.text_area("chunk_text", chunks[ck_i], height=150, disabled=True,
-             label_visibility="collapsed")
 
-# ── Player controls (Apple Podcasts style) ─────────────
-has_audio = "audio" in st.session_state
+# Placeholder for chunk text / live transcript (filled below)
+chunk_display = st.empty()
+
+# ── Player controls (streaming) ────────────────────────
+is_active = st.session_state.get("_streaming_active", False)
 left, middle, right = st.columns([1, 2, 1])
 
 with left:
-    if st.button("⏪ 15s", use_container_width=True, disabled=not has_audio):
-        queue_player_action("rewind15")
-
+    rewind_clicked = st.button("⏪ 15s", use_container_width=True, disabled=not is_active)
 with middle:
-    if st.button("▶ Play / Pause", type="primary", use_container_width=True):
-        if has_audio:
-            queue_player_action("toggle")
-        else:
-            with st.spinner("Generating rolling speech…"):
-                try:
-                    pending_chunks = chunks[ck_i:]
-                    non_empty_chunks = [c for c in pending_chunks if c.strip()]
-                    if not non_empty_chunks:
-                        st.warning("No readable text found in this chunk range.")
-                    else:
-                        total_pending = len(non_empty_chunks)
-                        pcm_all = bytearray()
-                        progress = st.progress(0.0, text=f"Chunk 1 / {total_pending}")
-                        for i, chunk in enumerate(non_empty_chunks, start=1):
-                            try:
-                                pcm_all.extend(tts(client, chunk, voice, style))
-                            except Exception as chunk_err:
-                                raise RuntimeError(f"Chunk {i}/{total_pending}: {chunk_err}") from chunk_err
-                            progress.progress(i / total_pending, text=f"Chunk {i} / {total_pending}")
-                        progress.empty()
-                        st.session_state.audio = pcm_to_wav(bytes(pcm_all))
-                        st.session_state.ck_idx = total - 1
-                        queue_player_action("play")
-                except Exception as e:
-                    st.error(f"TTS error: {e}")
-
+    play_clicked = st.button("▶ Play / Pause", type="primary", use_container_width=True)
 with right:
-    if st.button("15s ⏩", use_container_width=True, disabled=not has_audio):
-        queue_player_action("forward15")
+    forward_clicked = st.button("15s ⏩", use_container_width=True, disabled=not is_active)
 
-if "audio" in st.session_state:
-    st.audio(st.session_state.audio, format="audio/wav", autoplay=False)
-    action = st.session_state.get("_player_action")
-    if action:
-        run_player_action(action)
-        st.session_state._player_action = None
+progress_display = st.empty()
+
+# Handle seek buttons
+if rewind_clicked:
+    streamer_action("rewind15")
+if forward_clicked:
+    streamer_action("forward15")
+
+# Handle play / pause
+did_stream = False
+if play_clicked:
+    if is_active:
+        streamer_action("toggle")
+    else:
+        pending = [c for c in chunks[ck_i:] if c.strip()]
+        if not pending:
+            st.warning("No readable text in this chunk range.")
+        else:
+            did_stream = True
+            init_audio_streamer()
+            pcm_all = bytearray()
+            accumulated = []
+
+            for i, ck in enumerate(pending):
+                try:
+                    pcm = tts(client, ck, voice, style)
+                except Exception as e:
+                    st.error(f"TTS error (chunk {i + 1}/{len(pending)}): {e}")
+                    break
+                pcm_all.extend(pcm)
+                send_audio_chunk(pcm)
+                accumulated.append(ck)
+                chunk_display.text_area(
+                    "📝 Live Transcript",
+                    " ".join(accumulated),
+                    height=200,
+                    disabled=True,
+                )
+                progress_display.progress(
+                    (i + 1) / len(pending),
+                    f"Streaming: chunk {i + 1} / {len(pending)}",
+                )
+
+            progress_display.empty()
+            if pcm_all:
+                st.session_state.audio = pcm_to_wav(bytes(pcm_all))
+                st.session_state._streaming_active = True
+                st.session_state._transcript = " ".join(accumulated)
+                st.session_state.ck_idx = ck_i + len(accumulated) - 1
+
+# Fill the text display when not actively streaming
+if not did_stream:
+    if st.session_state.get("_streaming_active"):
+        transcript = st.session_state.get("_transcript", "")
+        if transcript:
+            chunk_display.text_area(
+                "📝 Transcript", transcript, height=200, disabled=True
+            )
+    else:
+        chunk_display.text_area(
+            "chunk_text", chunks[ck_i], height=150,
+            disabled=True, label_visibility="collapsed",
+        )
+
+# Stop streamer if flagged (e.g. chapter change, chunk slider move)
+if st.session_state.pop("_stop_streamer", False):
+    streamer_action("stop")
