@@ -78,24 +78,65 @@ def pcm_to_wav(pcm: bytes, rate=24000, ch=1, width=2) -> bytes:
     return buf.getvalue()
 
 
+def _extract_audio_from_response(resp) -> bytes | None:
+    """Safely extract inline PCM from a Gemini response."""
+    for cand in getattr(resp, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            data = getattr(inline, "data", None)
+            if data:
+                return data
+    return None
+
+
+def _tts_response_error(resp) -> str:
+    """Build a useful error when TTS returns no audio payload."""
+    details = []
+    feedback = getattr(resp, "prompt_feedback", None)
+    if feedback:
+        reason = getattr(feedback, "block_reason", None)
+        reason_msg = getattr(feedback, "block_reason_message", None)
+        if reason:
+            details.append(f"block_reason={reason}")
+        if reason_msg:
+            details.append(str(reason_msg))
+    for cand in (getattr(resp, "candidates", None) or [])[:1]:
+        finish = getattr(cand, "finish_reason", None)
+        if finish:
+            details.append(f"finish_reason={finish}")
+    text = getattr(resp, "text", None)
+    if text:
+        details.append(f"text={str(text)[:180]}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    return "No audio returned by TTS model. Try again or lower words/chunk." + suffix
+
+
 def tts(client, text: str, voice: str, style: str = "") -> bytes:
     """Call Gemini TTS and return PCM audio bytes."""
     prompt = f"{style}:\n\n{text}" if style else text
-    r = client.models.generate_content(
-        model="gemini-2.5-flash-preview-tts",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice,
+    last_error = "No audio returned by TTS model."
+    # Retry once because the TTS endpoint can intermittently return empty candidates.
+    for _ in range(2):
+        r = client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice,
+                        )
                     )
-                )
+                ),
             ),
-        ),
-    )
-    return r.candidates[0].content.parts[0].inline_data.data
+        )
+        pcm = _extract_audio_from_response(r)
+        if pcm:
+            return pcm
+        last_error = _tts_response_error(r)
+    raise RuntimeError(last_error)
 
 
 def chunk_text(text: str, n: int = 100) -> list[str]:
@@ -293,7 +334,10 @@ with middle:
                         pcm_all = bytearray()
                         progress = st.progress(0.0, text=f"Chunk 1 / {total_pending}")
                         for i, chunk in enumerate(non_empty_chunks, start=1):
-                            pcm_all.extend(tts(client, chunk, voice, style))
+                            try:
+                                pcm_all.extend(tts(client, chunk, voice, style))
+                            except Exception as chunk_err:
+                                raise RuntimeError(f"Chunk {i}/{total_pending}: {chunk_err}") from chunk_err
                             progress.progress(i / total_pending, text=f"Chunk {i} / {total_pending}")
                         progress.empty()
                         st.session_state.audio = pcm_to_wav(bytes(pcm_all))
