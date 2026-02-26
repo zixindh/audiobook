@@ -33,7 +33,8 @@ Set **one** of these:
 2. **Select** chapter → text split into ~100-word chunks
 3. **Play** → Gemini TTS rolls from the current chunk to chapter end (100-word chunks by default)
 4. **Autoplay** starts the generated audio immediately (single click flow)
-5. **Navigate** with Prev / Next / slider
+5. **Control playback** with Apple-style transport buttons: **⏪ 15s / ▶ Play-Pause / 15s ⏩**
+6. **Navigate** start position with the chunk slider
 
 ## Token Efficiency
 

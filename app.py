@@ -105,28 +105,54 @@ def chunk_text(text: str, n: int = 100) -> list[str]:
 
 
 def clear_playback():
-    """Clear cached audio + autoplay state."""
-    for key in ("audio", "_force_autoplay", "_audio_nonce"):
+    """Clear cached audio + player action state."""
+    for key in ("audio", "_player_action", "_audio_nonce"):
         st.session_state.pop(key, None)
 
 
-def force_autoplay():
-    """Nudge browser autoplay in case built-in autoplay is blocked."""
+def queue_player_action(action: str):
+    """Queue a browser-side player action for the current rerun."""
+    st.session_state._audio_nonce = st.session_state.get("_audio_nonce", 0) + 1
+    st.session_state._player_action = action
+
+
+def run_player_action(action: str):
+    """Run browser-side audio controls from Streamlit button clicks."""
     nonce = st.session_state.get("_audio_nonce", 0)
     components.html(
         f"""
         <script>
           const nonce = "{nonce}";
-          const playLatest = () => {{
+          const action = "{action}";
+          const runAction = () => {{
             const players = window.parent.document.querySelectorAll("audio");
             if (!players.length) return;
             const player = players[players.length - 1];
-            player.autoplay = true;
-            player.play().catch(() => {{}});
+            if (action === "play") {{
+              player.autoplay = true;
+              player.play().catch(() => {{}});
+              return;
+            }}
+            if (action === "toggle") {{
+              if (player.paused) {{
+                player.play().catch(() => {{}});
+              }} else {{
+                player.pause();
+              }}
+              return;
+            }}
+            if (action === "rewind15") {{
+              player.currentTime = Math.max(0, player.currentTime - 15);
+              return;
+            }}
+            if (action === "forward15") {{
+              const maxT = Number.isFinite(player.duration) ? player.duration : player.currentTime + 15;
+              player.currentTime = Math.min(maxT, player.currentTime + 15);
+            }}
           }};
-          playLatest();
-          setTimeout(playLatest, 200);
-          setTimeout(playLatest, 900);
+          runAction();
+          setTimeout(runAction, 200);
+          setTimeout(runAction, 900);
         </script>
         """,
         height=0,
@@ -233,53 +259,56 @@ chunks = chunk_text(chs[ch_i]["text"], wpc)
 total = len(chunks)
 ck_i = min(st.session_state.ck_idx, total - 1)
 
-c1, c2, c3 = st.columns([1, 4, 1])
-with c1:
-    if st.button("⏮ Prev", disabled=ck_i == 0, use_container_width=True):
-        st.session_state.ck_idx = ck_i - 1
-        clear_playback()
-        st.rerun()
-with c2:
-    new_ck = st.slider("pos", 0, max(total - 1, 0), ck_i, label_visibility="collapsed")
-    if new_ck != ck_i:
-        st.session_state.ck_idx = new_ck
-        clear_playback()
-        st.rerun()
-with c3:
-    if st.button("Next ⏭", disabled=ck_i >= total - 1, use_container_width=True):
-        st.session_state.ck_idx = ck_i + 1
-        clear_playback()
-        st.rerun()
+new_ck = st.slider("Start chunk", 0, max(total - 1, 0), ck_i)
+if new_ck != ck_i:
+    st.session_state.ck_idx = new_ck
+    clear_playback()
+    st.rerun()
 
 st.caption(f"Chunk {ck_i + 1} / {total}  ·  {len(chunks[ck_i].split())} words")
 st.text_area("chunk_text", chunks[ck_i], height=150, disabled=True,
              label_visibility="collapsed")
 
-# ── Generate & play audio ──────────────────────────────
-if st.button("▶  Play", type="primary", use_container_width=True):
-    with st.spinner("Generating rolling speech…"):
-        try:
-            pending_chunks = chunks[ck_i:]
-            non_empty_chunks = [c for c in pending_chunks if c.strip()]
-            if not non_empty_chunks:
-                st.warning("No readable text found in this chunk range.")
-            else:
-                total_pending = len(non_empty_chunks)
-                pcm_all = bytearray()
-                progress = st.progress(0.0, text=f"Chunk 1 / {total_pending}")
-                for i, chunk in enumerate(non_empty_chunks, start=1):
-                    pcm_all.extend(tts(client, chunk, voice, style))
-                    progress.progress(i / total_pending, text=f"Chunk {i} / {total_pending}")
-                progress.empty()
-                st.session_state.audio = pcm_to_wav(bytes(pcm_all))
-                st.session_state.ck_idx = total - 1
-                st.session_state._audio_nonce = st.session_state.get("_audio_nonce", 0) + 1
-                st.session_state._force_autoplay = True
-        except Exception as e:
-            st.error(f"TTS error: {e}")
+# ── Player controls (Apple Podcasts style) ─────────────
+has_audio = "audio" in st.session_state
+left, middle, right = st.columns([1, 2, 1])
+
+with left:
+    if st.button("⏪ 15s", use_container_width=True, disabled=not has_audio):
+        queue_player_action("rewind15")
+
+with middle:
+    if st.button("▶ Play / Pause", type="primary", use_container_width=True):
+        if has_audio:
+            queue_player_action("toggle")
+        else:
+            with st.spinner("Generating rolling speech…"):
+                try:
+                    pending_chunks = chunks[ck_i:]
+                    non_empty_chunks = [c for c in pending_chunks if c.strip()]
+                    if not non_empty_chunks:
+                        st.warning("No readable text found in this chunk range.")
+                    else:
+                        total_pending = len(non_empty_chunks)
+                        pcm_all = bytearray()
+                        progress = st.progress(0.0, text=f"Chunk 1 / {total_pending}")
+                        for i, chunk in enumerate(non_empty_chunks, start=1):
+                            pcm_all.extend(tts(client, chunk, voice, style))
+                            progress.progress(i / total_pending, text=f"Chunk {i} / {total_pending}")
+                        progress.empty()
+                        st.session_state.audio = pcm_to_wav(bytes(pcm_all))
+                        st.session_state.ck_idx = total - 1
+                        queue_player_action("play")
+                except Exception as e:
+                    st.error(f"TTS error: {e}")
+
+with right:
+    if st.button("15s ⏩", use_container_width=True, disabled=not has_audio):
+        queue_player_action("forward15")
 
 if "audio" in st.session_state:
-    st.audio(st.session_state.audio, format="audio/wav", autoplay=True)
-    if st.session_state.get("_force_autoplay"):
-        force_autoplay()
-        st.session_state._force_autoplay = False
+    st.audio(st.session_state.audio, format="audio/wav", autoplay=False)
+    action = st.session_state.get("_player_action")
+    if action:
+        run_player_action(action)
+        st.session_state._player_action = None
