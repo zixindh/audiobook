@@ -287,17 +287,22 @@ if "chapters" not in st.session_state:
 
 chs = st.session_state.chapters
 
+def _on_ch_change():
+    st.session_state._ch_changed = True
+
 st.selectbox(
     "Chapter",
     range(len(chs)),
     format_func=lambda i: chs[i]["title"],
     key="ch_idx",
+    on_change=_on_ch_change,
 )
 
-# Stop player when chapter changes
-if st.session_state.get("_prev_ch") is not None and st.session_state._prev_ch != st.session_state.ch_idx:
-    player_action("stop")
-st.session_state._prev_ch = st.session_state.ch_idx
+# Stable placeholder so layout doesn't shift between reruns
+_stop_slot = st.empty()
+if st.session_state.pop("_ch_changed", False):
+    with _stop_slot:
+        player_action("stop")
 
 ch = chs[st.session_state.ch_idx]
 ch_chunks = chunk_text(ch["text"], wpc)
