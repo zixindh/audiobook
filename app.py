@@ -2,7 +2,7 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
-import os, io, wave, base64
+import os, base64
 from google import genai
 from google.genai import types
 
@@ -67,17 +67,6 @@ def get_client():
 
 
 # ── Audio helpers ───────────────────────────────────────
-def pcm_to_wav(pcm: bytes, rate=24000, ch=1, width=2) -> bytes:
-    """Wrap raw PCM in a WAV container for st.audio()."""
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(ch)
-        w.setsampwidth(width)
-        w.setframerate(rate)
-        w.writeframes(pcm)
-    return buf.getvalue()
-
-
 def _extract_audio_from_response(resp) -> bytes | None:
     """Safely extract inline PCM from a Gemini response."""
     for cand in getattr(resp, "candidates", None) or []:
@@ -147,7 +136,7 @@ def chunk_text(text: str, n: int = 100) -> list[str]:
 
 def clear_playback():
     """Clear cached audio and streaming state."""
-    for key in ("audio", "_streaming_active", "_transcript"):
+    for key in ("_streaming_active", "_transcript"):
         st.session_state.pop(key, None)
     st.session_state._stop_streamer = True
 
@@ -477,7 +466,6 @@ if play_clicked:
 
             progress_display.empty()
             if pcm_all:
-                st.session_state.audio = pcm_to_wav(bytes(pcm_all))
                 st.session_state._streaming_active = True
                 st.session_state._transcript = " ".join(accumulated)
                 st.session_state.ck_idx = ck_i + len(accumulated) - 1
