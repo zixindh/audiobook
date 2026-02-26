@@ -109,45 +109,81 @@ def chunk_text(text, n=100):
     return [" ".join(words[i : i + n]) for i in range(0, len(words), n)] or [""]
 
 
-# ── JS audio player (queue-based, gapless, speed control) ──
+# ── JS audio player ─────────────────────────────────────
+# Uses <audio> elements instead of Web Audio API so the browser's
+# built-in WSOLA time-stretcher preserves pitch at any speed
+# (same mechanism YouTube uses).
 def init_player(speed=1.0):
     js = """
     (function() {
         var p = window.parent;
         if (p._player) try { p._player.stop(); } catch(e) {}
-        var ctx = new AudioContext({sampleRate: 24000});
-        if (ctx.state === 'suspended') ctx.resume();
         p._player = {
-            ctx: ctx, nextTime: 0, sources: [], speed: __SPEED__,
+            queue: [], current: null, speed: __SPEED__, paused: false,
+
             addChunk: function(b64) {
-                if (this.ctx.state === 'closed') return;
-                if (this.ctx.state === 'suspended') this.ctx.resume();
-                var bin = atob(b64);
-                var u8 = new Uint8Array(bin.length);
-                for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-                var i16 = new Int16Array(u8.buffer);
-                var f32 = new Float32Array(i16.length);
-                for (var j = 0; j < i16.length; j++) f32[j] = i16[j] / 32768.0;
-                var buf = this.ctx.createBuffer(1, f32.length, 24000);
-                buf.copyToChannel(f32, 0);
-                var src = this.ctx.createBufferSource();
-                src.buffer = buf;
-                src.playbackRate.value = this.speed;
-                src.connect(this.ctx.destination);
-                var t = Math.max(this.ctx.currentTime + 0.02, this.nextTime);
-                src.start(t);
-                this.nextTime = t + buf.duration / this.speed;
-                this.sources.push(src);
+                var url = URL.createObjectURL(this._wav(b64));
+                this.queue.push(url);
+                if (!this.current && !this.paused) this._next();
             },
+
+            _next: function() {
+                if (this.queue.length === 0) { this.current = null; return; }
+                var url = this.queue.shift();
+                var a = new Audio(url);
+                a.playbackRate = this.speed;
+                var self = this;
+                a.onended = function() {
+                    URL.revokeObjectURL(url);
+                    a.onended = null;
+                    self._next();
+                };
+                this.current = a;
+                a.play().catch(function(){});
+            },
+
+            setSpeed: function(s) {
+                this.speed = s;
+                if (this.current) this.current.playbackRate = s;
+            },
+
             togglePause: function() {
-                if (this.ctx.state === 'running') this.ctx.suspend();
-                else if (this.ctx.state === 'suspended') this.ctx.resume();
+                if (!this.current) return;
+                if (this.current.paused) { this.current.play(); this.paused = false; }
+                else { this.current.pause(); this.paused = true; }
             },
+
             stop: function() {
-                this.sources.forEach(function(s) { try { s.stop(); } catch(e) {} });
-                this.sources = [];
-                this.nextTime = 0;
-                try { this.ctx.close(); } catch(e) {}
+                if (this.current) {
+                    this.current.pause();
+                    this.current.onended = null;
+                    this.current = null;
+                }
+                this.queue.forEach(function(u) { URL.revokeObjectURL(u); });
+                this.queue = [];
+                this.paused = false;
+            },
+
+            /* Convert raw 24 kHz 16-bit mono PCM (base64) → WAV Blob */
+            _wav: function(b64) {
+                var bin = atob(b64);
+                var pcm = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) pcm[i] = bin.charCodeAt(i);
+                var h = new ArrayBuffer(44), d = new DataView(h);
+                d.setUint32(0,  0x52494646, false);
+                d.setUint32(4,  36 + pcm.length, true);
+                d.setUint32(8,  0x57415645, false);
+                d.setUint32(12, 0x666d7420, false);
+                d.setUint32(16, 16, true);
+                d.setUint16(20, 1, true);
+                d.setUint16(22, 1, true);
+                d.setUint32(24, 24000, true);
+                d.setUint32(28, 48000, true);
+                d.setUint16(32, 2, true);
+                d.setUint16(34, 16, true);
+                d.setUint32(36, 0x64617461, false);
+                d.setUint32(40, pcm.length, true);
+                return new Blob([h, pcm], {type: 'audio/wav'});
             }
         };
     })();
@@ -173,7 +209,10 @@ def send_audio(pcm, container):
 
 
 def player_action(action):
-    js = {"pause": "p.togglePause();", "stop": "p.stop();"}
+    js = {
+        "pause": "p.togglePause();",
+        "stop": "p.stop();",
+    }
     components.html(
         f'<script>(function(){{ var p=window.parent._player; if(p) {{ {js[action]} }} }})();</script>',
         height=0,
@@ -345,6 +384,12 @@ if play:
             progress_bar.success(
                 f"Done — {len(playlist)} chunks, {n_chs} chapter(s)"
             )
+
+# Sync speed to player on every rerun (handles live slider changes mid-playback)
+components.html(
+    f'<script>(function(){{ var p=window.parent._player; if(p) p.setSpeed({speed}); }})();</script>',
+    height=0,
+)
 
 # Keep mobile browser tab alive with silent oscillator
 components.html("""<script>
