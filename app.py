@@ -31,6 +31,24 @@ def _load_cache():
         return None
 
 
+def _dedup_titles(chapters):
+    """Append (2), (3) etc. to duplicate chapter titles."""
+    counts = {}
+    for ch in chapters:
+        t = ch["title"]
+        counts[t] = counts.get(t, 0) + 1
+    dupes = {t for t, c in counts.items() if c > 1}
+    if not dupes:
+        return chapters
+    seen = {}
+    for ch in chapters:
+        t = ch["title"]
+        if t in dupes:
+            seen[t] = seen.get(t, 0) + 1
+            ch["title"] = f"{t} ({seen[t]})"
+    return chapters
+
+
 # ── Voices & styles (Puck first = default) ──────────────
 VOICES = [
     ("Puck", "Upbeat"), ("Kore", "Firm"), ("Charon", "Informative"),
@@ -236,7 +254,7 @@ with st.sidebar:
     style_name = st.selectbox("Style", list(STYLES.keys()))
     style = STYLES[style_name]
 
-    wpc = st.slider("Words / chunk", 50, 200, 100, 10)
+    wpc = st.slider("Words / chunk", 20, 200, 100, 10)
 
     st.divider()
     mode = st.radio("Input", ["Upload", "Paste"], horizontal=True)
@@ -251,7 +269,7 @@ with st.sidebar:
                 from parsers import parse_file
 
                 try:
-                    parsed = parse_file(f, f.name)
+                    parsed = _dedup_titles(parse_file(f, f.name))
                     st.session_state.chapters = parsed
                     st.session_state.ch_idx = 0
                     st.session_state._fkey = fkey
@@ -264,7 +282,7 @@ with st.sidebar:
         if pasted and st.button("Load"):
             from parsers import parse_pasted_text
 
-            st.session_state.chapters = parse_pasted_text(pasted)
+            st.session_state.chapters = _dedup_titles(parse_pasted_text(pasted))
             st.session_state.ch_idx = 0
             _save_cache("Pasted", st.session_state.chapters)
 
@@ -279,7 +297,7 @@ if not client:
 if "chapters" not in st.session_state:
     cached = _load_cache()
     if cached:
-        st.session_state.chapters = cached["chapters"]
+        st.session_state.chapters = _dedup_titles(cached["chapters"])
         st.toast(f"Restored: {cached.get('name', 'book')}")
     else:
         st.info("Upload a file or paste text in the sidebar.")
@@ -293,7 +311,7 @@ def _on_ch_change():
 st.selectbox(
     "Chapter",
     range(len(chs)),
-    format_func=lambda i: chs[i]["title"],
+    format_func=lambda i: f"{i + 1}. {chs[i]['title']}",
     key="ch_idx",
     on_change=_on_ch_change,
 )
@@ -375,7 +393,7 @@ if play:
         st.warning("No text to read.")
     else:
         init_player()
-        time.sleep(0.3)
+        time.sleep(0.1)
         audio_box = st.container()
         lines = []
         prev_ch = -1
