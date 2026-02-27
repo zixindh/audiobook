@@ -332,29 +332,23 @@ st.caption(
 )
 
 # ── Player controls ─────────────────────────────────────
-c1, c2, c3 = st.columns(3)
-with c1:
-    play = st.button("▶ Play", type="primary", use_container_width=True)
-with c2:
-    pause = st.button("⏸ Pause", use_container_width=True)
-with c3:
-    stop = st.button("⏹ Stop", use_container_width=True)
+play = st.button("▶ Play", type="primary", use_container_width=True)
 
-if pause:
-    player_action("pause")
-if stop:
-    player_action("stop")
-
-# Speed buttons — pure JS, no Streamlit rerun, no playback interruption
+# Pause, Stop, Speed — pure JS buttons, no Streamlit rerun
 components.html("""
 <style>
-.sb{border:1px solid #ddd;background:#fafafa;padding:3px 11px;border-radius:4px;
+.cb{border:1px solid #ddd;background:#fafafa;padding:4px 14px;border-radius:4px;
+    cursor:pointer;font-size:14px;font-family:sans-serif}
+.cb:hover{background:#eee}
+.sb{border:1px solid #ddd;background:#fafafa;padding:4px 11px;border-radius:4px;
     cursor:pointer;font-size:13px;font-family:sans-serif}
 .sb:hover{background:#eee}
 .sb.on{background:#ff4b4b;color:#fff;border-color:#ff4b4b}
 </style>
-<div style="display:flex;gap:6px;align-items:center">
- <span style="font-size:13px;color:#888">Speed</span>
+<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+ <button class="cb" onclick="var p=window.parent._player;if(p)p.togglePause()">⏸ Pause</button>
+ <button class="cb" onclick="var p=window.parent._player;if(p)p.stop()">⏹ Stop</button>
+ <span style="margin-left:6px;font-size:13px;color:#888">Speed</span>
  <button class="sb" onclick="ss(1)">1×</button>
  <button class="sb" onclick="ss(1.25)">1.25×</button>
  <button class="sb" onclick="ss(1.5)">1.5×</button>
@@ -373,7 +367,7 @@ document.querySelectorAll('.sb').forEach(function(b){
     b.classList.toggle('on',parseFloat(b.textContent)===c);
 });
 </script>
-""", height=36)
+""", height=42)
 
 progress_bar = st.empty()
 transcript = st.empty()
