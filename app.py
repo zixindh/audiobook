@@ -346,7 +346,7 @@ components.html("""
 .sb.on{background:#ff4b4b;color:#fff;border-color:#ff4b4b}
 </style>
 <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
- <button class="cb" onclick="var p=window.parent._player;if(p)p.togglePause()">⏸ Pause</button>
+ <button class="cb" id="pbtn" onclick="var p=window.parent._player;if(p){p.togglePause();this.textContent=p.paused?'▶ Resume':'⏸ Pause'}">⏸ Pause</button>
  <button class="cb" onclick="var p=window.parent._player;if(p)p.stop()">⏹ Stop</button>
  <span style="margin-left:6px;font-size:13px;color:#888">Speed</span>
  <button class="sb" onclick="ss(1)">1×</button>
